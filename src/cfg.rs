@@ -135,6 +135,7 @@ impl CFGInfo {
         let approx_loop_depth = self.approx_loop_depth.cleared();
         let mut backedge_stack: SmallVec<[u32; 4]> = smallvec![];
         let mut cur_depth = 0;
+        let mut in_loop_span = alloc::vec::Vec::with_capacity(nb);
         for block in 0..nb {
             if backedge_in[block] > 0 {
                 cur_depth += 1;
@@ -153,6 +154,7 @@ impl CFGInfo {
                 cur_depth
             };
             approx_loop_depth.push(depth);
+            in_loop_span.push(cur_depth > 0);
 
             while backedge_stack.len() > 0 && backedge_out[block] > 0 {
                 backedge_out[block] -= 1;
@@ -169,7 +171,8 @@ impl CFGInfo {
             let b = Block::new(block);
             let depth = approx_loop_depth[block];
             loop_exit_block.push(
-                f.block_succs(b).is_empty()
+                in_loop_span[block]
+                    && f.block_succs(b).is_empty()
                     && f.block_preds(b)
                         .iter()
                         .any(|pred| approx_loop_depth[pred.index()] > depth),
