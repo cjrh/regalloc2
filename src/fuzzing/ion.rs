@@ -14,6 +14,7 @@ const OPTIONS: func::Options = func::Options {
     fixed_def_clobbers: true,
     reftypes: true,
     callsite_ish_constraints: true,
+    exit_blocks: true,
     ..func::Options::DEFAULT
 };
 

@@ -370,6 +370,9 @@ pub struct Options {
     pub fixed_def_clobbers: bool,
     pub reftypes: bool,
     pub callsite_ish_constraints: bool,
+    /// Let some side-exit blocks end in a return instead of a branch, so
+    /// that blocks without successors appear inside loops.
+    pub exit_blocks: bool,
     pub num_blocks: RangeInclusive<usize>,
     pub num_vregs_per_block: RangeInclusive<usize>,
     pub num_uses_per_inst: RangeInclusive<usize>,
@@ -387,6 +390,7 @@ impl Options {
         fixed_def_clobbers: false,
         reftypes: false,
         callsite_ish_constraints: false,
+        exit_blocks: false,
         num_blocks: 1..=100,
         num_vregs_per_block: 5..=15,
         num_uses_per_inst: 0..=10,
@@ -444,6 +448,9 @@ impl Func {
             from += 1;
         }
         for pred in out_blocks {
+            if opts.exit_blocks && bool::arbitrary(u)? {
+                continue;
+            }
             let succ = *u.choose(&in_blocks[..])?;
             builder.add_edge(Block::new(pred), Block::new(succ));
         }
