@@ -1,0 +1,36 @@
+test compile precise-output
+set opt_level=speed
+set preserve_frame_pointers=true
+target x86_64
+
+; A return inside a loop: find the first index whose element equals key.
+; The in-loop return block has no successors, so the change also treats it
+; as a loop exit. This checks that hot code does not get worse.
+function %find(i64, i64, i64) -> i64 system_v {
+block0(v0: i64, v1: i64, v2: i64):
+    v100 = iconst.i64 3
+    v101 = iconst.i64 1
+    ; v0 = base, v1 = n, v2 = key
+    v3 = iconst.i64 0
+    v4 = icmp sgt v1, v3
+    brif v4, block1(v3), block4
+
+block1(v5: i64):
+    v6 = ishl v5, v100
+    v7 = iadd v0, v6
+    v8 = load.i64 notrap aligned v7
+    v9 = icmp eq v8, v2
+    brif v9, block2, block3
+
+block2:
+    return v5
+
+block3:
+    v10 = iadd v5, v101
+    v11 = icmp slt v10, v1
+    brif v11, block1(v10), block4
+
+block4:
+    v12 = iconst.i64 -1
+    return v12
+}

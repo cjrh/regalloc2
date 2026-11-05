@@ -1,0 +1,184 @@
+test compile precise-output
+set opt_level=speed
+set preserve_frame_pointers=true
+target x86_64
+
+; Reverse s[lo..=hi] in place, checking both indices against len. Each
+; failed check calls a reporting function with the index and the length,
+; then traps. Equivalent Rust:
+;
+;     while lo < hi {
+;         if lo >= len { trap_index_oob(lo, len) }
+;         if hi >= len { trap_index_oob(hi, len) }
+;         s.swap(lo, hi); lo += 1; hi -= 1;
+;     }
+function %reverse_call(i64, i64, i64, i64) system_v {
+    sig0 = (i64, i64) system_v
+    fn0 = %trap_index_oob sig0
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    v100 = iconst.i64 3
+    v101 = iconst.i64 1
+    ; v0 = base, v1 = len, v2 = lo, v3 = hi
+    v4 = icmp slt v2, v3
+    brif v4, block1(v2, v3), block6
+
+block1(v5: i64, v6: i64):
+    v7 = icmp ult v5, v1
+    brif v7, block3, block2
+
+block2 cold:
+    call fn0(v5, v1)
+    trap user1
+
+block3:
+    v8 = ishl v5, v100
+    v9 = iadd v0, v8
+    v10 = load.i64 notrap aligned v9
+    v11 = icmp ult v6, v1
+    brif v11, block5, block4
+
+block4 cold:
+    call fn0(v6, v1)
+    trap user1
+
+block5:
+    v12 = ishl v6, v100
+    v13 = iadd v0, v12
+    v14 = load.i64 notrap aligned v13
+    store notrap aligned v14, v9
+    store notrap aligned v10, v13
+    v15 = iadd v5, v101
+    v16 = isub v6, v101
+    v17 = icmp slt v15, v16
+    brif v17, block1(v15, v16), block6
+
+block6:
+    return
+}
+
+; Control: the same loop whose failed checks only trap. Its loop body is the
+; lower bound for %reverse_call.
+function %reverse_trap(i64, i64, i64, i64) system_v {
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    v100 = iconst.i64 3
+    v101 = iconst.i64 1
+    v4 = icmp slt v2, v3
+    brif v4, block1(v2, v3), block6
+
+block1(v5: i64, v6: i64):
+    v7 = icmp ult v5, v1
+    brif v7, block3, block2
+
+block2 cold:
+    trap user1
+
+block3:
+    v8 = ishl v5, v100
+    v9 = iadd v0, v8
+    v10 = load.i64 notrap aligned v9
+    v11 = icmp ult v6, v1
+    brif v11, block5, block4
+
+block4 cold:
+    trap user1
+
+block5:
+    v12 = ishl v6, v100
+    v13 = iadd v0, v12
+    v14 = load.i64 notrap aligned v13
+    store notrap aligned v14, v9
+    store notrap aligned v10, v13
+    v15 = iadd v5, v101
+    v16 = isub v6, v101
+    v17 = icmp slt v15, v16
+    brif v17, block1(v15, v16), block6
+
+block6:
+    return
+}
+
+; Both checks branch to one cold block that takes the index as a block
+; parameter. The base allocator already handles this shape.
+function %reverse_shared_block(i64, i64, i64, i64) system_v {
+    sig0 = (i64, i64) system_v
+    fn0 = %trap_index_oob sig0
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    v100 = iconst.i64 3
+    v101 = iconst.i64 1
+    v4 = icmp slt v2, v3
+    brif v4, block1(v2, v3), block6
+
+block1(v5: i64, v6: i64):
+    v7 = icmp ult v5, v1
+    brif v7, block3, block2(v5)
+
+block2(v20: i64) cold:
+    call fn0(v20, v1)
+    trap user1
+
+block3:
+    v8 = ishl v5, v100
+    v9 = iadd v0, v8
+    v10 = load.i64 notrap aligned v9
+    v11 = icmp ult v6, v1
+    brif v11, block5, block2(v6)
+
+block5:
+    v12 = ishl v6, v100
+    v13 = iadd v0, v12
+    v14 = load.i64 notrap aligned v13
+    store notrap aligned v14, v9
+    store notrap aligned v10, v13
+    v15 = iadd v5, v101
+    v16 = isub v6, v101
+    v17 = icmp slt v15, v16
+    brif v17, block1(v15, v16), block6
+
+block6:
+    return
+}
+
+; As %reverse_shared_block, with a per-site code as a second block
+; parameter. Not fixed by the change: the cold block has two predecessors
+; inside the loop, so the edge moves for its parameters (here, materializing
+; the codes) run on the in-loop edges.
+function %reverse_shared_block_site(i64, i64, i64, i64) system_v {
+    sig0 = (i64, i64, i64) system_v
+    fn0 = %trap_index_oob_at sig0
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    v100 = iconst.i64 3
+    v101 = iconst.i64 1
+    v102 = iconst.i64 16
+    v103 = iconst.i64 32
+    v4 = icmp slt v2, v3
+    brif v4, block1(v2, v3), block6
+
+block1(v5: i64, v6: i64):
+    v7 = icmp ult v5, v1
+    brif v7, block3, block2(v5, v102)
+
+block2(v20: i64, v21: i64) cold:
+    call fn0(v20, v1, v21)
+    trap user1
+
+block3:
+    v8 = ishl v5, v100
+    v9 = iadd v0, v8
+    v10 = load.i64 notrap aligned v9
+    v11 = icmp ult v6, v1
+    brif v11, block5, block2(v6, v103)
+
+block5:
+    v12 = ishl v6, v100
+    v13 = iadd v0, v12
+    v14 = load.i64 notrap aligned v13
+    store notrap aligned v14, v9
+    store notrap aligned v10, v13
+    v15 = iadd v5, v101
+    v16 = isub v6, v101
+    v17 = icmp slt v15, v16
+    brif v17, block1(v15, v16), block6
+
+block6:
+    return
+}

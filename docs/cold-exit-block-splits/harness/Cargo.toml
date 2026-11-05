@@ -1,0 +1,17 @@
+[package]
+name = "cold-exit-repro"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: not a member of the regalloc2 workspace.
+[workspace]
+
+[dependencies]
+cranelift-codegen = { version = "=0.137.0", features = ["x86", "disas"] }
+cranelift-control = "=0.137.0"
+cranelift-reader = "=0.137.0"
+
+# Build Cranelift against the regalloc2 checkout this directory lives in.
+[patch.crates-io]
+regalloc2 = { path = "../../.." }
