@@ -37,6 +37,13 @@ pub struct CFGInfo {
     /// indices. Otherwise, it will be approximate, but should still
     /// be usable for heuristic purposes.
     pub approx_loop_depth: Vec<u32>,
+    /// For each block, is it an exit block (no successors: a return or a
+    /// trap) entered from a deeper loop level? Such a block runs at most
+    /// once per call, but a value that flows into it from the loop would
+    /// otherwise share the loop's bundle and constraints. The allocator
+    /// gives these blocks' live ranges bundles of their own, so a fixed
+    /// register use there only costs a move on the exit path.
+    pub loop_exit_block: Vec<bool>,
 }
 
 impl CFGInfo {
@@ -134,7 +141,18 @@ impl CFGInfo {
                 backedge_stack.push(backedge_in[block]);
             }
 
-            approx_loop_depth.push(cur_depth);
+            // A block without successors (a return or a trap) cannot reach
+            // a backedge, so it runs at most once per call, wherever the
+            // block order places it. Clients often lower cold exit paths,
+            // such as a failure call before a trap, inside a loop's span of
+            // the order; giving them the loop's depth would weight their
+            // uses as hot.
+            let depth = if f.block_succs(Block::new(block)).is_empty() {
+                0
+            } else {
+                cur_depth
+            };
+            approx_loop_depth.push(depth);
 
             while backedge_stack.len() > 0 && backedge_out[block] > 0 {
                 backedge_out[block] -= 1;
@@ -144,6 +162,18 @@ impl CFGInfo {
                     backedge_stack.pop();
                 }
             }
+        }
+
+        let loop_exit_block = self.loop_exit_block.cleared();
+        for block in 0..nb {
+            let b = Block::new(block);
+            let depth = approx_loop_depth[block];
+            loop_exit_block.push(
+                f.block_succs(b).is_empty()
+                    && f.block_preds(b)
+                        .iter()
+                        .any(|pred| approx_loop_depth[pred.index()] > depth),
+            );
         }
 
         Ok(())

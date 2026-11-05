@@ -16,9 +16,10 @@ use crate::ion::data_structures::{
     BlockparamOut, CodeRange, Env, LiveBundleIndex, LiveRangeList, SpillSet, SpillSlotIndex,
     VRegIndex,
 };
-use crate::{Function, Inst, OperandConstraint, OperandKind, PReg, ProgPoint};
+use crate::{Block, Function, Inst, OperandConstraint, OperandKind, PReg, ProgPoint, VReg};
 use alloc::format;
 use core::convert::TryFrom;
+use smallvec::{smallvec, SmallVec};
 
 impl<'a, F: Function> Env<'a, F> {
     fn merge_bundle_properties(&mut self, from: LiveBundleIndex, to: LiveBundleIndex) {
@@ -256,74 +257,124 @@ impl<'a, F: Function> Env<'a, F> {
         true
     }
 
+    /// The block whose loop-exit bundle `range` belongs to, if any. Live
+    /// ranges are never coalesced across the entry of a loop-exit block, and
+    /// such a block has no successors, so a range that starts in one lies
+    /// entirely within it.
+    fn loop_exit_block_of(&self, range: CodeRange) -> Option<Block> {
+        let block = self.cfginfo.insn_block[range.from.inst().index()];
+        self.cfginfo.loop_exit_block[block.index()].then_some(block)
+    }
+
+    fn init_vreg_bundle_props(&mut self, bundle: LiveBundleIndex) {
+        let mut fixed = false;
+        let mut fixed_def = false;
+        let mut stack = false;
+        let mut limit: Option<u8> = None;
+        for entry in &self.bundles[bundle].ranges {
+            for u in &self.ranges[entry.index].uses {
+                use OperandConstraint::*;
+                match u.operand.constraint() {
+                    FixedReg(_) => {
+                        fixed = true;
+                        if u.operand.kind() == OperandKind::Def {
+                            fixed_def = true;
+                        }
+                    }
+                    Stack => stack = true,
+                    Limit(current) => {
+                        let current = u8::try_from(current)
+                            .expect("the current limit is too large to fit in a u8");
+                        match limit {
+                            Some(prev) => limit = Some(prev.min(current)),
+                            None => limit = Some(current),
+                        }
+                    }
+                    Any | Reg | Reuse(_) => {
+                        continue;
+                    }
+                }
+                if fixed && stack && fixed_def {
+                    break;
+                }
+            }
+        }
+        if fixed {
+            self.bundles[bundle].set_cached_fixed();
+        }
+        if fixed_def {
+            self.bundles[bundle].set_cached_fixed_def();
+        }
+        if stack {
+            self.bundles[bundle].set_cached_stack();
+        }
+        self.bundles[bundle].limit = limit;
+    }
+
+    /// The bundle holding `vreg` at `inst`. Before bundle merging, a vreg's
+    /// ranges outside loop-exit blocks share the bundle of its first range.
+    fn vreg_bundle_at(&self, vreg: VReg, inst: Inst) -> LiveBundleIndex {
+        let ranges = &self.vregs[vreg].ranges;
+        let block = self.cfginfo.insn_block[inst.index()];
+        if self.cfginfo.loop_exit_block[block.index()] {
+            let point = ProgPoint::before(inst);
+            for entry in ranges.iter() {
+                if entry.range.from <= point && point < entry.range.to {
+                    return self.ranges[entry.index].bundle;
+                }
+            }
+        }
+        self.ranges[ranges[0].index].bundle
+    }
+
     pub fn merge_vreg_bundles(&mut self) {
-        // Create a bundle for every vreg, initially.
+        // Create a bundle for every vreg, initially. A vreg's ranges in a
+        // loop-exit block get a bundle per block, so that constraints there
+        // do not apply to the vreg's ranges in the loop.
         trace!("merge_vreg_bundles: creating vreg bundles");
+        let mut new_bundles: SmallVec<[LiveBundleIndex; 4]> = smallvec![];
         for vreg in 0..self.vregs.len() {
             let vreg = VRegIndex::new(vreg);
             if self.vregs[vreg].ranges.is_empty() {
                 continue;
             }
 
-            let bundle = self.ctx.bundles.add(self.ctx.scratch_bump.clone());
             let mut range = self.vregs[vreg].ranges.first().unwrap().range;
-
-            self.bundles[bundle].ranges = self.vregs[vreg].ranges.clone();
-            trace!("vreg v{} gets bundle{}", vreg.index(), bundle.index());
-            for entry in &self.ctx.bundles[bundle].ranges {
-                trace!(
-                    " -> with LR range{}: {:?}",
-                    entry.index.index(),
-                    entry.range
-                );
+            let mut main_bundle = LiveBundleIndex::invalid();
+            let mut exit_bundle = (LiveBundleIndex::invalid(), Block::invalid());
+            new_bundles.clear();
+            for i in 0..self.vregs[vreg].ranges.len() {
+                let entry = self.vregs[vreg].ranges[i];
                 range = range.join(entry.range);
+                let bundle = match self.loop_exit_block_of(entry.range) {
+                    Some(block) => {
+                        if exit_bundle.1 != block {
+                            let bundle = self.ctx.bundles.add(self.ctx.scratch_bump.clone());
+                            new_bundles.push(bundle);
+                            exit_bundle = (bundle, block);
+                        }
+                        exit_bundle.0
+                    }
+                    None => {
+                        if !main_bundle.is_valid() {
+                            main_bundle = self.ctx.bundles.add(self.ctx.scratch_bump.clone());
+                            new_bundles.push(main_bundle);
+                        }
+                        main_bundle
+                    }
+                };
+                trace!(
+                    "vreg v{} LR range{}: {:?} -> bundle{}",
+                    vreg.index(),
+                    entry.index.index(),
+                    entry.range,
+                    bundle.index()
+                );
+                self.ctx.bundles[bundle].ranges.push(entry);
                 self.ctx.ranges[entry.index].bundle = bundle;
             }
 
-            let mut fixed = false;
-            let mut fixed_def = false;
-            let mut stack = false;
-            let mut limit: Option<u8> = None;
-            for entry in &self.bundles[bundle].ranges {
-                for u in &self.ranges[entry.index].uses {
-                    use OperandConstraint::*;
-                    match u.operand.constraint() {
-                        FixedReg(_) => {
-                            fixed = true;
-                            if u.operand.kind() == OperandKind::Def {
-                                fixed_def = true;
-                            }
-                        }
-                        Stack => stack = true,
-                        Limit(current) => {
-                            let current = u8::try_from(current)
-                                .expect("the current limit is too large to fit in a u8");
-                            match limit {
-                                Some(prev) => limit = Some(prev.min(current)),
-                                None => limit = Some(current),
-                            }
-                        }
-                        Any | Reg | Reuse(_) => {
-                            continue;
-                        }
-                    }
-                    if fixed && stack && fixed_def {
-                        break;
-                    }
-                }
-            }
-            if fixed {
-                self.bundles[bundle].set_cached_fixed();
-            }
-            if fixed_def {
-                self.bundles[bundle].set_cached_fixed_def();
-            }
-            if stack {
-                self.bundles[bundle].set_cached_stack();
-            }
-            self.bundles[bundle].limit = limit;
-
-            // Create a spillslot for this bundle.
+            // Create a spillslot for this vreg's bundles.
             let reg = self.vreg(vreg);
             let ssidx = self.spillsets.push(SpillSet {
                 slot: SpillSlotIndex::invalid(),
@@ -334,7 +385,10 @@ impl<'a, F: Function> Env<'a, F> {
                 splits: 0,
                 range,
             });
-            self.bundles[bundle].spillset = ssidx;
+            for &bundle in &new_bundles {
+                self.init_vreg_bundle_props(bundle);
+                self.bundles[bundle].spillset = ssidx;
+            }
         }
 
         for inst in 0..self.func.num_insts() {
@@ -352,9 +406,9 @@ impl<'a, F: Function> Env<'a, F> {
                         src_vreg,
                         dst_vreg
                     );
-                    let src_bundle = self.ranges[self.vregs[src_vreg].ranges[0].index].bundle;
+                    let src_bundle = self.vreg_bundle_at(src_vreg, inst);
                     debug_assert!(src_bundle.is_valid());
-                    let dest_bundle = self.ranges[self.vregs[dst_vreg].ranges[0].index].bundle;
+                    let dest_bundle = self.vreg_bundle_at(dst_vreg, inst);
                     debug_assert!(dest_bundle.is_valid());
                     self.merge_bundles(/* from */ dest_bundle, /* to */ src_bundle);
                 }
@@ -364,8 +418,15 @@ impl<'a, F: Function> Env<'a, F> {
         // Attempt to merge blockparams with their inputs.
         for i in 0..self.blockparam_outs.len() {
             let BlockparamOut {
-                from_vreg, to_vreg, ..
+                from_vreg,
+                to_vreg,
+                to_block,
+                ..
             } = self.blockparam_outs[i];
+            // Keep a loop's values out of a loop-exit block's bundles.
+            if self.cfginfo.loop_exit_block[to_block.index()] {
+                continue;
+            }
             trace!(
                 "trying to merge blockparam v{} with input v{}",
                 to_vreg.index(),

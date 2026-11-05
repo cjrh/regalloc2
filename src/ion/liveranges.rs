@@ -142,6 +142,18 @@ impl<'a, F: Function> Env<'a, F> {
         }
     }
 
+    /// Is `pos` the entry of a loop-exit block? Live ranges are not
+    /// coalesced across this point, so that the exit block's part of a
+    /// range can be given its own bundle (see `CFGInfo::loop_exit_block`).
+    fn starts_loop_exit_block(&self, pos: ProgPoint) -> bool {
+        if pos.inst().index() >= self.func.num_insts() {
+            return false;
+        }
+        let block = self.cfginfo.insn_block[pos.inst().index()];
+        self.cfginfo.loop_exit_block[block.index()]
+            && self.cfginfo.block_entry[block.index()] == pos
+    }
+
     /// Mark `range` as live for the given `vreg`.
     ///
     /// Returns the liverange that contains the given range.
@@ -193,6 +205,7 @@ impl<'a, F: Function> Env<'a, F> {
                 < self.ranges[self.vregs[vreg].ranges.last().unwrap().index]
                     .range
                     .from
+            || self.starts_loop_exit_block(range.to)
         {
             // Is not contiguous with previously-added (immediately
             // following) range; create a new range.
