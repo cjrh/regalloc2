@@ -34,6 +34,8 @@ use smallvec::smallvec;
 pub(crate) mod dump;
 pub(crate) mod moves;
 pub(crate) mod spill;
+#[cfg(test)]
+mod tests;
 
 impl<'a, F: Function> Env<'a, F> {
     pub(crate) fn new(func: &'a F, env: &'a MachineEnv, ctx: &'a mut Ctx) -> Self {

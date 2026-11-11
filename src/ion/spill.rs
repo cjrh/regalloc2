@@ -13,8 +13,8 @@
 //! Spillslot allocation.
 
 use super::{
-    AllocRegResult, Env, LiveRangeKey, PRegIndex, RegTraversalIter, SpillSetIndex, SpillSlotData,
-    SpillSlotIndex,
+    AllocRegResult, Env, LiveBundleIndex, LiveBundleVec, LiveRangeKey, PRegIndex, RegTraversalIter,
+    Requirement, SpillSetIndex, SpillSlotData, SpillSlotIndex,
 };
 use crate::{Allocation, Function, SpillSlot};
 
@@ -64,7 +64,69 @@ impl<'a, F: Function> Env<'a, F> {
                 self.ctx.spillsets[self.ctx.bundles[bundle].spillset].required = true;
             }
         }
+        self.move_bundles_to_spill_bundle_regs(&mut scratch);
         self.ctx.scratch_conflicts = scratch;
+    }
+
+    /// Moves each bundle whose spillset's spill bundle got a register into
+    /// that register, when the register is free for all of the bundle.
+    ///
+    /// Splitting trims a bundle to its uses and gives the rest of the
+    /// value's live range to the spill bundle. The trimmed bundles are
+    /// allocated first, the spill bundle last, and nothing but a hint ties
+    /// their registers together; when the spill bundle cannot take the
+    /// hinted register (it crosses a call that clobbers it, say) the value
+    /// changes register wherever a trimmed bundle meets the spill bundle.
+    /// For a value split before a loop and used inside it that is a move
+    /// before the first use and a move back after the last one, on every
+    /// iteration, although one register was free throughout.
+    ///
+    /// Only free space is taken, so no other bundle's allocation changes.
+    /// Bundles that need a particular register or a limited set are left
+    /// alone.
+    fn move_bundles_to_spill_bundle_regs(&mut self, scratch: &mut LiveBundleVec) {
+        for i in 0..self.ctx.bundles.len() {
+            let bundle = LiveBundleIndex::new(i);
+            let Some(old) = self.ctx.bundles[bundle].allocation.as_reg() else {
+                continue;
+            };
+            let spillset = self.ctx.bundles[bundle].spillset;
+            if spillset.is_invalid() {
+                continue;
+            }
+            let spill_bundle = self.ctx.spillsets[spillset].spill_bundle;
+            if spill_bundle.is_invalid() || spill_bundle == bundle {
+                continue;
+            }
+            let Some(preg) = self.ctx.bundles[spill_bundle].allocation.as_reg() else {
+                continue;
+            };
+            if self.ctx.pregs[preg.index()].is_stack {
+                continue;
+            }
+            let preg_idx = PRegIndex::new(preg.index());
+            if old == preg || self.ctx.bundles[bundle].limit.is_some() {
+                continue;
+            }
+            if !matches!(self.compute_requirement(bundle), Ok(Requirement::Register)) {
+                continue;
+            }
+            let old_idx = PRegIndex::new(old.index());
+            self.ctx.bundles[bundle].allocation = Allocation::none();
+            for entry in &self.ctx.bundles[bundle].ranges {
+                self.ctx.pregs[old_idx.index()]
+                    .allocations
+                    .btree
+                    .remove(&LiveRangeKey::from_range(&entry.range));
+            }
+            if let AllocRegResult::Allocated(_) =
+                self.try_to_allocate_bundle_to_reg(bundle, preg_idx, None, scratch)
+            {
+                continue;
+            }
+            let back = self.try_to_allocate_bundle_to_reg(bundle, old_idx, None, scratch);
+            debug_assert!(matches!(back, AllocRegResult::Allocated(_)));
+        }
     }
 
     pub fn spillslot_can_fit_spillset(
