@@ -1,0 +1,43 @@
+test compile precise-output
+set opt_level=speed
+set preserve_frame_pointers=true
+target x86_64
+
+; Fill a buffer of `len` bytes with one byte, `n` times, checking the index.
+; The length and the address come from calls before the loop; the count and
+; the byte are parameters live across those calls. Equivalent Rust:
+;
+;     let len = buffer_len(b);
+;     let rows = buffer_rows(b);
+;     let mut i = 0;
+;     loop {
+;         if i >= len { trap }
+;         *rows.add(i) = byte;
+;         i += 1;
+;         if i >= n { break }
+;     }
+function %fill(i64, i64, i64) -> i64 system_v {
+    sig0 = (i64) -> i64 system_v
+    fn0 = colocated u0:1 sig0
+    fn1 = colocated u0:2 sig0
+block0(v0: i64, v1: i64, v2: i64):
+    v3 = call fn0(v0)
+    v4 = call fn1(v0)
+    v5 = iconst.i64 0
+    jump block1(v5)
+block1(v6: i64):
+    v7 = icmp ult v6, v3
+    brif v7, block2, block3
+block3 cold:
+    trap user1
+block2:
+    v8 = iadd v4, v6
+    v11 = ireduce.i8 v2
+    store.i8 notrap aligned v11, v8
+    v12 = iconst.i64 1
+    v9 = iadd v6, v12
+    v10 = icmp slt v9, v1
+    brif v10, block1(v9), block4
+block4:
+    return v9
+}
