@@ -97,6 +97,92 @@ fn value_live_across_calls_keeps_one_register_in_the_loop() {
     );
 }
 
+/// A value kept on the stack around a loop is reloaded before the loop, not
+/// on each of its iterations.
+///
+/// The loop holds an exit block whose call clobbers every register while
+/// the value is live, and another such call follows the loop, so the
+/// value's spill bundle gets a stack slot. The piece holding the loop's use
+/// is trimmed to that use. Unless it is extended over the loop afterwards,
+/// the value is loaded from its slot before the use on every iteration.
+#[test]
+fn value_spilled_around_a_loop_is_reloaded_at_loop_entry() {
+    let call_clobbers = PRegSet::empty().with(p(1)).with(p(2)).with(p(3));
+    let f = TestFunction::new(vec![
+        // block0: v0 is the value; a call returns v1; v2 starts the count.
+        block(
+            &[],
+            vec![
+                inst(vec![def(0, reg())]),
+                inst(vec![def(1, fixed(0))]).clobbers(call_clobbers),
+                inst(vec![def(2, reg())]),
+                inst(vec![]).branch(&[(1, &[2])]),
+            ],
+        ),
+        // block1: loop header; compares the count v3 with v0.
+        block(
+            &[3],
+            vec![
+                inst(vec![use_(3, reg()), use_(0, reg())]),
+                inst(vec![]).branch(&[(2, &[]), (3, &[])]),
+            ],
+        ),
+        // block2: exit inside the loop's span; a call, then v0.
+        block(
+            &[],
+            vec![
+                inst(vec![def(5, fixed(0))]).clobbers(call_clobbers),
+                inst(vec![use_(0, reg()), use_(5, reg())]).ret(),
+            ],
+        ),
+        // block3: body; leaves when done.
+        block(
+            &[],
+            vec![
+                inst(vec![use_(3, reg()), def(4, reg())]),
+                inst(vec![]).branch(&[(4, &[]), (5, &[])]),
+            ],
+        ),
+        // block4: back edge.
+        block(&[], vec![inst(vec![]).branch(&[(1, &[4])])]),
+        // block5: a call, then v0 and v1.
+        block(
+            &[],
+            vec![
+                inst(vec![def(6, fixed(0))]).clobbers(call_clobbers),
+                inst(vec![use_(0, reg()), use_(1, reg()), use_(6, fixed(0))]).ret(),
+            ],
+        ),
+    ]);
+    let env = MachineEnv {
+        preferred_regs_by_class: [(0..4).map(p).collect(), PRegSet::empty(), PRegSet::empty()],
+        non_preferred_regs_by_class: [PRegSet::empty(), PRegSet::empty(), PRegSet::empty()],
+        scratch_by_class: [None, None, None],
+        fixed_stack_slots: vec![],
+    };
+    let mut options = RegallocOptions::default();
+    options.validate_ssa = true;
+    options.algorithm = Algorithm::Ion;
+    let output = run(&f, &env, &options).unwrap();
+
+    let mut checker = Checker::new(&f, &env);
+    checker.prepare(&output);
+    checker.run().unwrap();
+
+    // The back edge passes v4 to v3; that move is not at issue here.
+    let hot = [f.block_insns(Block::new(1)), f.block_insns(Block::new(3))];
+    let in_loop: Vec<_> = output
+        .edits
+        .iter()
+        .filter(|(point, _)| {
+            hot.iter().any(|insts| {
+                (insts.first().index()..=insts.last().index()).contains(&point.inst().index())
+            })
+        })
+        .collect();
+    assert!(in_loop.is_empty(), "moves inside the loop: {:?}", in_loop);
+}
+
 fn p(hw_enc: usize) -> PReg {
     PReg::new(hw_enc, RegClass::Int)
 }

@@ -44,6 +44,25 @@ pub struct CFGInfo {
     /// gives these blocks' live ranges bundles of their own, so a fixed
     /// register use there only costs a move on the exit path.
     pub loop_exit_block: Vec<bool>,
+    /// The loops found by the same backedge scan as `approx_loop_depth`:
+    /// each is a span of the block order from a backedge target to the last
+    /// source of a backedge to it.
+    pub loops: Vec<LoopSpan>,
+    /// For each block, the innermost loop whose span contains it, as an
+    /// index into `loops`, or `u32::MAX`. A block without successors that
+    /// lies in a span is included here although its depth is 0.
+    pub block_loop: Vec<u32>,
+}
+
+/// A loop as a span of the block order. See `CFGInfo::loops`.
+#[derive(Clone, Copy, Debug)]
+pub struct LoopSpan {
+    /// The backedge target.
+    pub header: u32,
+    /// The last block of the span.
+    pub last: u32,
+    /// The enclosing loop, or `u32::MAX`.
+    pub parent: u32,
 }
 
 impl CFGInfo {
@@ -134,13 +153,23 @@ impl CFGInfo {
 
         let approx_loop_depth = self.approx_loop_depth.cleared();
         let mut backedge_stack: SmallVec<[u32; 4]> = smallvec![];
+        let mut loop_stack: SmallVec<[u32; 4]> = smallvec![];
+        let loops = self.loops.cleared();
+        let block_loop = self.block_loop.cleared();
         let mut cur_depth = 0;
         let mut in_loop_span = alloc::vec::Vec::with_capacity(nb);
         for block in 0..nb {
             if backedge_in[block] > 0 {
                 cur_depth += 1;
                 backedge_stack.push(backedge_in[block]);
+                loop_stack.push(loops.len() as u32);
+                loops.push(LoopSpan {
+                    header: block as u32,
+                    last: block as u32,
+                    parent: loop_stack.iter().rev().nth(1).copied().unwrap_or(u32::MAX),
+                });
             }
+            block_loop.push(loop_stack.last().copied().unwrap_or(u32::MAX));
 
             // A block without successors (a return or a trap) cannot reach
             // a backedge, so it runs at most once per call, wherever the
@@ -162,6 +191,7 @@ impl CFGInfo {
                 if *backedge_stack.last().unwrap() == 0 {
                     cur_depth -= 1;
                     backedge_stack.pop();
+                    loops[loop_stack.pop().unwrap() as usize].last = block as u32;
                 }
             }
         }
